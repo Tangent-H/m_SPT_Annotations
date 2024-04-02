@@ -36,7 +36,7 @@ from lib.utils import save_to_csv
 
 def get_args_parser():
     parser = argparse.ArgumentParser('AutoFormer training and evaluation script', add_help=False)
-    parser.add_argument('--batch-size', default=64, type=int)
+    parser.add_argument('--batch-size', default=64, type=int)   # 这里在parser.parse_args()中会自动转成args.batch_size
     parser.add_argument('--epochs', default=300, type=int)
     parser.add_argument('--model_name', required=True, type=str)
 
@@ -183,7 +183,7 @@ def get_args_parser():
 
     parser.add_argument('--amp', action='store_true')
     parser.add_argument('--no-amp', action='store_false', dest='amp')
-
+    # 分布式训练调度器
     parser.add_argument(
         '--launcher',
         choices=['none', 'pytorch', 'slurm', 'mpi'],
@@ -200,6 +200,7 @@ def get_args_parser():
     parser.add_argument('--sensitivity_path', default='', type=str,)
     parser.add_argument('--scaler', default='naive', type=str,)
     parser.add_argument('--low_rank_dim', default=8, type=int, help='The rank of Adapter or LoRA')
+    # todo 下面这两个参数是什么意思
     parser.add_argument('--alpha', default=10., type=float, help='hyper-parameter, the easiness level for a matrix to be structurally tuned.')
     parser.add_argument('--beta', default=5., type=float, help='hyper-parameter, the easiness level for a vector to be structurally tuned.')
 
@@ -222,7 +223,7 @@ def get_args_parser():
 
 
 def main(args):
-
+    # 用于配置分布式训练，多个进程之间通信
     if args.launcher == 'none':
         args.distributed = False
     else:
@@ -232,8 +233,7 @@ def main(args):
         args.gpu = args.rank % torch.cuda.device_count()
 
     print(args)
-    args_text = yaml.safe_dump(args.__dict__, default_flow_style=False)
-
+    args_text = yaml.safe_dump(args.__dict__, default_flow_style=False) # 保存配置
     device = torch.device(args.device)
 
     # fix the seed for reproducibility
@@ -242,9 +242,11 @@ def main(args):
     np.random.seed(seed)
 
     cudnn.benchmark = True
+    # 导入图像分类的数据集
     dataset_train, args.nb_classes = build_dataset(is_train=True, args=args,)
     dataset_val, _ = build_dataset(is_train=False, args=args,)
 
+    # 分布式训练
     if args.distributed:
         num_tasks = utils.get_world_size()
         global_rank = utils.get_rank()
@@ -283,10 +285,11 @@ def main(args):
         dataset_val, batch_size=int(2 * args.batch_size),
         sampler=sampler_val, num_workers=args.num_workers,
         pin_memory=args.pin_mem, drop_last=False
-    )
+    )   # pin_memory=args.pin_mem: 如果设置为 True，会在数据加载后锁定数据在内存中的位置，这样的话，将数据从 CPU 转移到 GPU 会更快。
+        # drop_last=False: 在最后一个批次数据小于指定的批量大小时，这个选项决定是否丢弃它。这里设置为 False，表示不丢弃最后一个不完整的批次。
 
     print(f"{args.data_set} dataset, train: {len(dataset_train)}, evaluation: {len(dataset_val)}")
-
+    # 获得数据增强函数
     mixup_fn = None
     mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
     print('mixup_active',mixup_active)
@@ -299,6 +302,7 @@ def main(args):
     if args.get_sensitivity:
 
         # Always getting sensitivity from the training split
+        # 准备用于获得敏感度的数据集和model
         dataset_sensitivity, _ = build_dataset(is_train=True, args=args, )
         sampler_init = torch.utils.data.SequentialSampler(dataset_sensitivity)
 
@@ -317,6 +321,7 @@ def main(args):
                                                 num_classes=args.nb_classes
                                                 )
     else:
+        # 加载敏感度（如果有的话)，具体格式详见engine.py中如何保存sensitivity的
         param_info = torch.load(args.sensitivity_path, map_location='cpu')
         tuned_vectors = param_info['tuned_vectors']
         tuned_matrices = param_info['tuned_matrices']
@@ -365,6 +370,7 @@ def main(args):
     test_engine = evaluate
 
     if args.resume:
+        # 加载预训练模型权重
         # Hard-coded pre-trained model name
         if '.pth' in args.resume:
 
@@ -434,7 +440,7 @@ def main(args):
         model_without_ddp = model.module
 
     if args.mixup > 0.:
-        # smoothing is handled with mixup label transform
+        # smoothing is handled with mixup label transform（一种预处理label的方法）
         criterion = SoftTargetCrossEntropy()
     elif args.smoothing:
         criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
@@ -451,7 +457,7 @@ def main(args):
             alpha=args.alpha, beta=args.beta, structured_only=args.structured_only,
             sensitivity_batch_num=args.sensitivity_batch_num
         )
-
+        # 获得敏感度后直接返回
         return
 
     optimizer = utils.build_optimizer(args, model_without_ddp)
@@ -480,7 +486,7 @@ def main(args):
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
-
+        # train_engine是engine.py中训练一个epoch的函数
         train_stats = train_engine(
             model, criterion, data_loader_train,
             optimizer, device, epoch, loss_scaler,
